@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PhoneCam 보내기</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="send">
+
+<section class="join hidden" id="join">
+  <h1 style="margin:0;font-size:22px">연결 코드 입력</h1>
+  <p class="muted" style="margin:0">PC 받는 화면에 보이는 코드를 입력하세요. 띄어쓰기는 상관없습니다.</p>
+  <input id="codeinput" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="예: abcd efgh jkmn">
+  <button class="primary" id="joinbtn">다음</button>
+</section>
+
+<section id="main" class="hidden" style="display:flex;flex-direction:column;flex:1">
+  <div class="send-top">
+    <div class="status" id="status">카메라 꺼짐</div>
+  </div>
+  <div class="statsline small muted" id="stats"></div>
+  <div class="preview-wrap"><video id="local" autoplay playsinline muted></video></div>
+  <div class="send-controls">
+    <button class="primary wide" id="startbtn">카메라 켜고 연결</button>
+    <button id="flipbtn" disabled>전면/후면 전환</button>
+    <button id="qualitybtn">화질</button>
+    <button class="wide" id="pcaudiobtn">PC로 소리 보내기: 꺼짐</button>
+    <div class="wide fxgrid">
+      <div class="fxtitle">효과 (PC에서 처리해서 아이폰에는 부담이 없습니다)</div>
+      <button id="fxbg">배경: 그대로</button>
+      <button id="fxlight">조명: 끔</button>
+      <button id="fxsmooth">피부 보정: 끔</button>
+      <label class="btn" for="fxfile">배경 사진 고르기</label>
+      <div class="fxtitle">방향 (아이폰을 뒤집거나 눕혀 놓았을 때)</div>
+      <button id="fxrot">회전: 0°</button>
+      <button id="fxflip">좌우 반전: 끔</button>
+      <input type="file" id="fxfile" accept="image/*" hidden>
+    </div>
+    <button class="wide hidden" id="stopbtn">끄기</button>
+  </div>
+  <p class="tip">쓰는 동안 이 화면을 켜 두세요. 화면이 꺼지거나 다른 앱으로 가면 영상이 멈춥니다. 아이폰을 충전기에 꽂아 두는 걸 권합니다. 이 페이지를 즐겨찾기 해 두면 다음부터 QR 없이 바로 열 수 있습니다. 영상은 같은 와이파이 안의 내 PC로만 갑니다.</p>
+</section>
+
+<script src="vendor/peerjs.min.js"></script>
+<script src="common.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  const video = $('local');
+  const q = new URLSearchParams(location.search);
+
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+    window.__phonecamStatus = kind || 'wait';
+  }
+
+  // 코드: 주소의 # 뒤 → ?room= 순서. 없으면 입력 화면
+  let code = PHONECAM.cleanCode(location.hash.slice(1)) || PHONECAM.cleanCode(q.get('room'));
+  if (!code) {
+    $('join').classList.remove('hidden');
+    $('codeinput').value = PHONECAM.cleanCode(PHONECAM.store('phonecam.sendroom')) || '';
+    $('joinbtn').onclick = () => {
+      const c = PHONECAM.cleanCode($('codeinput').value);
+      if (c.length < 10) { $('codeinput').focus(); return; }
+      location.hash = c;
+      location.reload();
+    };
+    return;
+  }
+  PHONECAM.store('phonecam.sendroom', code);
+  $('main').classList.remove('hidden');
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus('이 브라우저에서는 카메라를 쓸 수 없습니다. 아이폰 Safari로 https 주소를 여세요.', 'bad');
+    $('startbtn').disabled = true;
+    return;
+  }
+
+  // 같은 와이파이 안에서만 쓰므로 비트레이트를 넉넉히 준다 (유튜브 1080p 업로드 권장치 수준)
+  const QUALITY = [
+    { label: '720p 30fps', width: 1280, height: 720, fps: 30, bitrate: 5000000 },
+    { label: '1080p 30fps', width: 1920, height: 1080, fps: 30, bitrate: 8000000 },
+    { label: '1080p 60fps', width: 1920, height: 1080, fps: 60, bitrate: 12000000 },
+  ];
+  const AUDIO_BITRATE = 128000;     // 소리 128kbps (PC 마이크가 없을 때 대용)
+  const savedQ = PHONECAM.store('phonecam.quality2');
+  let qIndex = (savedQ === null || savedQ === '' ? 1 : Number(savedQ)) % QUALITY.length; // 기본 1080p 30fps
+  let facing = PHONECAM.store('phonecam.facing') === 'user' ? 'user' : 'environment';
+  $('qualitybtn').textContent = '화질: ' + QUALITY[qIndex].label;
+
+  let stream = null;
+  let peer = null;
+  let call = null;      // 내 PC로 가는 영상
+  let conn = null;      // 내 PC와의 확인용 연결
+  let running = false;
+  let retryTimer = null;
+  let wakeLock = null;
+  let waitingForPc = false;
+  let authed = null;        // 확인을 마친 PC 연결 (효과 설정을 보낼 곳)
+  let fxState = null;       // PC가 알려 주는 효과 처리 상태
+  let pcAudio = PHONECAM.store('phonecam.pcaudio') === '1'; // PC(OBS)로 아이폰 소리도 보낼지
+
+  async function openCamera() {
+    const qq = QUALITY[qIndex];
+    const videoC = {
+      facingMode: { ideal: facing },
+      width: { ideal: qq.width },
+      height: { ideal: qq.height },
+      frameRate: { ideal: qq.fps },
+    };
+    let s;
+    try {
+      s = await navigator.mediaDevices.getUserMedia({
+        audio: pcAudio ? { echoCancellation: true, noiseSuppression: true, channelCount: { ideal: 2 } } : false,
+        video: videoC,
+      });
+    } catch (e) {
+      if (!pcAudio) throw e;
+      // 마이크만 거부된 경우: 소리를 끄고 영상만 연다
+      s = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoC });
+      pcAudio = false;
+      PHONECAM.store('phonecam.pcaudio', '0');
+      if (typeof updatePcAudioBtn === 'function') updatePcAudioBtn();
+      setTimeout(() => setStatus('마이크를 쓸 수 없어 소리 없이 보냅니다.', 'bad'), 0);
+    }
+    // 아이폰이 카메라를 놓아 버린 경우(다른 앱 사용 등) 다시 연다
+    const vt = s.getVideoTracks()[0];
+    if (vt) vt.addEventListener('ended', () => { if (running && stream === s) reopenCamera(); });
+    video.srcObject = s;
+    video.classList.toggle('mirror', facing === 'user');
+    video.play().catch(() => {});
+    return s;
+  }
+
+  async function keepAwake() {
+    try {
+      if ('wakeLock' in navigator && document.visibilityState === 'visible') {
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    } catch (e) { /* 지원하지 않으면 무시 */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (running && document.visibilityState === 'visible') keepAwake();
+  });
+
+  function videoSender(c) {
+    if (!c || !c.peerConnection) return null;
+    return c.peerConnection.getSenders().find((s) => s.track && s.track.kind === 'video') ||
+      c.peerConnection.getSenders().find((s) => s.track === null) || null;
+  }
+
+  function setMax(sender, bps) {
+    if (!sender) return;
+    const p = sender.getParameters();
+    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+    p.encodings[0].maxBitrate = bps;
+    sender.setParameters(p).catch(() => {});
+  }
+
+  function applyBitrate(c) {
+    setMax(videoSender(c), QUALITY[qIndex].bitrate);
+    if (c && c.peerConnection) {
+      const a = c.peerConnection.getSenders().find((x) => x.track && x.track.kind === 'audio');
+      setMax(a, AUDIO_BITRATE);
+    }
+  }
+
+  // 실제로 나가는 해상도·프레임·속도를 2초마다 표시
+  let lastBytes = null;
+  async function showStats() {
+    if (!running) { $('stats').textContent = ''; return; }
+    const track = stream && stream.getVideoTracks()[0];
+    const cam = track ? track.getSettings() : {};
+    let line = '카메라 ' + (cam.width || '?') + '×' + (cam.height || '?') + ' ' + Math.round(cam.frameRate || 0) + 'fps';
+    try {
+      // 이 아이폰 카메라가 브라우저에서 낼 수 있는 최대치 (기기·iOS마다 다름)
+      const cap = track.getCapabilities ? track.getCapabilities() : null;
+      if (cap && cap.width && cap.height) line += ' (최대 ' + cap.width.max + '×' + cap.height.max + (cap.frameRate ? ' ' + Math.round(cap.frameRate.max) + 'fps' : '') + ')';
+    } catch (e) {}
+    if (call && call.peerConnection && call.peerConnection.connectionState === 'connected') {
+      const st = await call.peerConnection.getStats();
+      st.forEach((r) => {
+        if (r.type === 'outbound-rtp' && r.kind === 'video') {
+          const now = { b: r.bytesSent, t: r.timestamp };
+          const mbps = lastBytes ? ((now.b - lastBytes.b) * 8) / ((now.t - lastBytes.t) * 1000) : 0;
+          lastBytes = now;
+          line += ' · PC로 ' + (r.frameWidth || '?') + '×' + (r.frameHeight || '?') + ' · ' + Math.round(r.framesPerSecond || 0) + 'fps · ' + mbps.toFixed(1) + 'Mbps';
+        }
+      });
+    } else lastBytes = null;
+    if (fxState && fxState.on) {
+      line += ' · PC 효과 ' + (fxState.failed ? '사람 분리 불가(조명만)' : !fxState.ready && fx.bg !== 'none' ? '준비 중' : fxState.fps + 'fps' + (fxState.segMs ? ' (분리 ' + fxState.segMs + 'ms)' : ''));
+    }
+    $('stats').textContent = line;
+    window.__phonecamStats = line;
+  }
+  setInterval(() => showStats().catch(() => {}), 2000);
+
+  function scheduleRetry(ms) {
+    clearTimeout(retryTimer);
+    if (!running) return;
+    retryTimer = setTimeout(dial, ms);
+  }
+
+  function hangup() {
+    if (call) { try { call.close(); } catch (e) {} call = null; }
+    if (conn) { try { conn.close(); } catch (e) {} conn = null; }
+  }
+
+  // 1단계: 상대가 코드를 아는 내 PC인지 확인 → 2단계: 확인되면 영상 보내기
+  async function dial() {
+    if (!running || !peer || peer.destroyed || peer.disconnected) return;
+    hangup();
+    if (!waitingForPc) setStatus('PC에 연결하는 중…', '');
+    const target = await PHONECAM.peerId(code);
+    const c = peer.connect(target, { reliable: true });
+    if (!c) { scheduleRetry(3000); return; }
+    conn = c;
+    const myNonce = PHONECAM.nonce();
+    let theirNonce = null;
+    const giveUp = setTimeout(() => { if (conn === c && !call) scheduleRetry(0); }, 15000);
+
+    c.on('data', async (m) => {
+      if (conn !== c || !m) return;
+      if (m.t === 'hello' && typeof m.n === 'string' && m.n.length <= 64 && !theirNonce) {
+        theirNonce = m.n;
+        c.send({ t: 'auth', n: myNonce, mac: await PHONECAM.sign(code, 'S|' + theirNonce + '|' + myNonce) });
+      } else if (m.t === 'fxstate') {
+        fxState = m;
+      } else if (m.t === 'ok' && theirNonce) {
+        const expect = await PHONECAM.sign(code, 'R|' + myNonce + '|' + theirNonce);
+        if (!PHONECAM.sameMac(m.mac, expect)) {
+          // 이름만 흉내 낸 가짜 상대. 영상은 보내지 않는다.
+          clearTimeout(giveUp);
+          setStatus('확인되지 않은 상대라서 보내지 않았습니다. 잠시 뒤 다시 시도합니다.', 'bad');
+          scheduleRetry(10000);
+          return;
+        }
+        clearTimeout(giveUp);
+        authed = c;
+        sendFx();
+        startCall(target);
+      } else if (m.t === 'deny') {
+        clearTimeout(giveUp);
+        setStatus('PC가 코드를 거부했습니다. PC 화면의 코드(QR)를 다시 찍으세요.', 'bad');
+        scheduleRetry(10000);
+      }
+    });
+    c.on('close', () => { if (conn === c) { clearTimeout(giveUp); conn = null; if (call) { try { call.close(); } catch (e) {} call = null; } scheduleRetry(2000); } });
+  }
+
+  function startCall(target) {
+    // PC로는 영상 + (켜져 있으면) 소리
+    const c = peer.call(target, new MediaStream(pcAudio ? stream.getTracks() : stream.getVideoTracks()));
+    if (!c) { scheduleRetry(3000); return; }
+    call = c;
+    const pc = c.peerConnection;
+    const giveUp = setTimeout(() => { if (call === c && pc.connectionState !== 'connected') scheduleRetry(0); }, 15000);
+    pc.addEventListener('connectionstatechange', () => {
+      if (call !== c) return;
+      const s = pc.connectionState;
+      if (s === 'connected') {
+        waitingForPc = false; clearTimeout(giveUp);
+        // 같은 와이파이(집 안 경로)인지 확인. 아니면 보내지 않는다.
+        PHONECAM.connectionPath(pc).then((path) => {
+          window.__phonecamPath = path;
+          if (call !== c) return;
+          if (!path.local) {
+            setStatus('PC와 같은 와이파이가 아니라서 보내지 않았습니다. 와이파이를 확인하세요.', 'bad');
+            hangup();
+            scheduleRetry(10000);
+            return;
+          }
+          setStatus('PC로 보내는 중', 'ok');
+          applyBitrate(c);
+        });
+      }
+      if (s === 'failed' || s === 'closed') { clearTimeout(giveUp); setStatus('연결이 끊겼습니다. 다시 연결하는 중…', 'bad'); scheduleRetry(2000); }
+      if (s === 'disconnected') setStatus('연결이 불안정합니다…', 'bad');
+    });
+    c.on('close', () => { if (call === c) { clearTimeout(giveUp); scheduleRetry(2000); } });
+  }
+
+  function startPeer() {
+    peer = new Peer(PHONECAM.peerOptions());
+    peer.on('open', () => dial());
+    peer.on('disconnected', () => setTimeout(() => { if (running && peer && !peer.destroyed) peer.reconnect(); }, 2000));
+    peer.on('call', (c) => { try { c.close(); } catch (e) {} }); // 아이폰은 영상을 받지 않는다
+    peer.on('error', (err) => {
+      if (!running) return;
+      if (err.type === 'peer-unavailable') {
+        waitingForPc = true;
+        setStatus('PC 받는 화면을 기다리는 중 (PC에서 받는 화면이나 OBS를 열어 두세요)', '');
+        scheduleRetry(3000);
+        return;
+      }
+      if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
+        setStatus('중개 서버에 연결하지 못했습니다. 와이파이를 확인하세요. 다시 시도하는 중…', 'bad');
+        setTimeout(() => { if (!running) return; try { peer.destroy(); } catch (e) {} startPeer(); }, 5000);
+      }
+    });
+  }
+
+  // ---------- 켜기 / 끄기 ----------
+  async function start() {
+    $('startbtn').disabled = true;
+    setStatus('카메라 켜는 중…', '');
+    try {
+      stream = await openCamera();
+    } catch (e) {
+      $('startbtn').disabled = false;
+      setStatus(e && e.name === 'NotAllowedError'
+        ? '카메라 권한이 거부됐습니다. 설정 > Safari > 카메라에서 허용으로 바꾼 뒤 다시 누르세요.'
+        : '카메라를 켜지 못했습니다: ' + (e && e.name), 'bad');
+      return;
+    }
+    running = true;
+    $('startbtn').classList.add('hidden');
+    $('stopbtn').classList.remove('hidden');
+    $('flipbtn').disabled = false;
+    keepAwake();
+    startPeer();
+  }
+
+  function stop() {
+    running = false;
+    clearTimeout(retryTimer);
+    hangup();
+    try { peer && peer.destroy(); } catch (e) {}
+    peer = null;
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+    video.srcObject = null;
+    try { wakeLock && wakeLock.release(); } catch (e) {}
+    $('startbtn').classList.remove('hidden');
+    $('startbtn').disabled = false;
+    $('stopbtn').classList.add('hidden');
+    $('flipbtn').disabled = true;
+    setStatus('카메라 꺼짐', '');
+  }
+
+  // 카메라나 화질을 바꿀 때: 연결은 그대로 두고 영상 트랙만 갈아 끼운다
+  async function reopenCamera() {
+    if (!running) return;
+    if (stream) stream.getTracks().forEach((t) => t.stop()); // 아이폰은 카메라 두 개를 동시에 못 여는 경우가 있어 먼저 끈다
+    try {
+      stream = await openCamera();
+    } catch (e) {
+      setStatus('카메라를 바꾸지 못했습니다: ' + (e && e.name), 'bad');
+      return;
+    }
+    const track = stream.getVideoTracks()[0];
+    const sender = videoSender(call);
+    if (sender) { await sender.replaceTrack(track).catch(() => {}); applyBitrate(call); }
+  }
+
+  function updatePcAudioBtn() {
+    $('pcaudiobtn').textContent = 'PC로 소리 보내기: ' + (pcAudio ? '켜짐 (128kbps)' : '꺼짐');
+    $('pcaudiobtn').classList.toggle('primary', pcAudio);
+  }
+  updatePcAudioBtn();
+  // 소리를 켜고 끄면 마이크를 다시 열고 PC와 다시 연결한다 (1~2초 끊김)
+  $('pcaudiobtn').onclick = async () => {
+    pcAudio = !pcAudio;
+    PHONECAM.store('phonecam.pcaudio', pcAudio ? '1' : '0');
+    updatePcAudioBtn();
+    if (!running) return;
+    await reopenCamera();
+    hangup();
+    scheduleRetry(0);
+  };
+
+  // ---------- 효과 (설정은 아이폰에서, 처리는 PC에서) ----------
+  const BG = [['none', '그대로'], ['blur', '흐리게'], ['studio', '스튜디오'], ['dark', '어둡게'], ['photo', '내 사진']];
+  const LEVEL = ['끔', '약하게', '강하게'];
+  let fx = { bg: 'none', light: 0, smooth: 0, rot: 0, flip: false };
+  try { fx = { ...fx, ...JSON.parse(PHONECAM.store('phonecam.fxsend') || '{}') }; } catch (e) {}
+  let hasPhoto = PHONECAM.store('phonecam.fxhasphoto') === '1';
+
+  function renderFx() {
+    const b = BG.find((x) => x[0] === fx.bg) || BG[0];
+    $('fxbg').textContent = '배경: ' + b[1];
+    $('fxlight').textContent = '조명: ' + LEVEL[fx.light];
+    $('fxsmooth').textContent = '피부 보정: ' + LEVEL[fx.smooth];
+    $('fxbg').classList.toggle('primary', fx.bg !== 'none');
+    $('fxlight').classList.toggle('primary', fx.light > 0);
+    $('fxsmooth').classList.toggle('primary', fx.smooth > 0);
+    $('fxrot').textContent = '회전: ' + fx.rot + '°';
+    $('fxflip').textContent = '좌우 반전: ' + (fx.flip ? '켬' : '끔');
+    $('fxrot').classList.toggle('primary', fx.rot !== 0);
+    $('fxflip').classList.toggle('primary', fx.flip);
+  }
+  function sendFx() {
+    PHONECAM.store('phonecam.fxsend', JSON.stringify(fx));
+    renderFx();
+    if (authed && authed === conn && authed.open) authed.send({ t: 'fx', fx });
+  }
+  renderFx();
+  $('fxbg').onclick = () => {
+    let i = BG.findIndex((x) => x[0] === fx.bg);
+    do { i = (i + 1) % BG.length; } while (BG[i][0] === 'photo' && !hasPhoto);
+    fx.bg = BG[i][0];
+    sendFx();
+  };
+  $('fxlight').onclick = () => { fx.light = (fx.light + 1) % 3; sendFx(); };
+  $('fxsmooth').onclick = () => { fx.smooth = (fx.smooth + 1) % 3; sendFx(); };
+  $('fxrot').onclick = () => { fx.rot = (fx.rot + 90) % 360; sendFx(); };
+  $('fxflip').onclick = () => { fx.flip = !fx.flip; sendFx(); };
+
+  // 배경 사진: 아이폰 사진을 1920px 이하 JPEG로 줄여 PC로 보낸다 (PC가 기억해 둠)
+  $('fxfile').onchange = async () => {
+    const file = $('fxfile').files && $('fxfile').files[0];
+    $('fxfile').value = '';
+    if (!file) return;
+    if (!(authed && authed === conn && authed.open)) { setStatus('PC와 연결된 뒤에 사진을 고르세요.', 'bad'); return; }
+    try {
+      const img = await createImageBitmap(file);
+      const s = Math.min(1, 1920 / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * s); cv.height = Math.round(img.height * s);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      const blob = await new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.85));
+      authed.send({ t: 'fxphoto', type: 'image/jpeg', data: await blob.arrayBuffer() });
+      hasPhoto = true;
+      PHONECAM.store('phonecam.fxhasphoto', '1');
+      fx.bg = 'photo';
+      setTimeout(sendFx, 300);
+    } catch (e) {
+      setStatus('사진을 보내지 못했습니다: ' + (e && e.name), 'bad');
+    }
+  };
+
+  $('startbtn').onclick = start;
+  $('stopbtn').onclick = stop;
+  $('flipbtn').onclick = () => {
+    facing = facing === 'user' ? 'environment' : 'user';
+    PHONECAM.store('phonecam.facing', facing);
+    reopenCamera();
+  };
+  $('qualitybtn').onclick = () => {
+    qIndex = (qIndex + 1) % QUALITY.length;
+    PHONECAM.store('phonecam.quality2', String(qIndex));
+    $('qualitybtn').textContent = '화질: ' + QUALITY[qIndex].label;
+    reopenCamera();
+  };
+  window.addEventListener('hashchange', () => location.reload());
+})();
+</script>
+</body>
+</html>

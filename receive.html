@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhoneCam 받는 화면</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="receive">
+<video id="remote" autoplay playsinline muted></video>
+<canvas id="fxcanvas"></canvas>
+
+<button id="soundbtn" class="hidden" style="position:fixed;right:16px;bottom:16px;z-index:5">🔊 소리 켜기</button>
+<div id="obswait" class="hidden">PhoneCam · 아이폰 연결을 기다리는 중</div>
+<div id="panel">
+  <div class="panel-box">
+    <div class="qr" id="qr"></div>
+    <div class="info">
+      <h1>아이폰으로 QR을 찍으세요</h1>
+      <div class="status" id="status">준비 중…</div>
+      <div>
+        <div class="muted small">연결 코드</div>
+        <div class="code" id="code">-</div>
+      </div>
+      <ol>
+        <li>아이폰 기본 카메라 앱으로 왼쪽 QR을 찍고, 뜨는 링크를 엽니다.</li>
+        <li>아이폰에서 <b>카메라 켜고 연결</b>을 누르고 카메라 허용을 누릅니다.</li>
+        <li>연결되면 이 화면에 아이폰 영상이 나옵니다.</li>
+      </ol>
+      <div>
+        <div class="muted small">OBS 브라우저 소스에 넣을 주소 (이 주소는 계속 같습니다)</div>
+        <div class="copyrow">
+          <input id="obsurl" readonly>
+          <button id="copy">복사</button>
+        </div>
+      </div>
+      <div class="muted small">연결된 뒤 이 안내를 다시 보려면 화면을 클릭하세요. 새 코드가 필요하면 <a href="#" id="newcode">새 코드 만들기</a>.</div>
+    </div>
+  </div>
+</div>
+
+<script src="vendor/peerjs.min.js"></script>
+<script src="vendor/qrcode.js"></script>
+<script src="common.js"></script>
+<script src="effects.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  const video = $('remote');
+  const q = new URLSearchParams(location.search);
+
+  if (q.get('fit') === 'cover') document.body.classList.add('cover');
+  // 효과는 PC에서 처리. 설정은 아이폰에서 보내오고, 다음에 열 때를 위해 기억해 둔다.
+  PHONECAM_FX.init($('remote'), $('fxcanvas'));
+  try { PHONECAM_FX.set(JSON.parse(PHONECAM.store('phonecam.fx') || 'null')); } catch (e) {}
+  // OBS용 화면: QR과 코드를 숨긴다 (Discord 화면에 코드가 비치지 않게)
+  const obsMode = q.get('obs') === '1';
+  if (obsMode) { document.body.classList.add('obs'); $('obswait').classList.remove('hidden'); }
+
+  // 방 코드: 주소에 있으면 그대로, 없으면 지난번 코드 또는 새 코드. 주소에 고정해서 OBS 주소가 바뀌지 않게 한다.
+  const okLen = (c) => (c && c.length >= 10 ? c : '');
+  let code = okLen(PHONECAM.cleanCode(q.get('room'))) || okLen(PHONECAM.cleanCode(PHONECAM.store('phonecam.room'))) || PHONECAM.newCode();
+  PHONECAM.store('phonecam.room', code);
+  if (q.get('room') !== code) {
+    q.set('room', code);
+    history.replaceState(null, '', location.pathname + '?' + q.toString());
+  }
+
+  const sendUrl = PHONECAM.carryParams(new URL('send.html', location.href).toString()).split('#')[0] + '#' + code;
+  $('code').textContent = code.match(/.{1,4}/g).join(' ');
+  const obsUrl = new URL(location.href);
+  obsUrl.searchParams.set('obs', '1');
+  $('obsurl').value = obsUrl.toString();
+
+  const qr = qrcode(0, 'M');
+  qr.addData(sendUrl);
+  qr.make();
+  $('qr').innerHTML = qr.createImgTag(6, 0, '아이폰 연결용 QR 코드');
+  $('qr').title = sendUrl;
+
+  $('copy').onclick = async () => {
+    try { await navigator.clipboard.writeText($('obsurl').value); $('copy').textContent = '복사됨'; }
+    catch (e) { $('obsurl').select(); document.execCommand('copy'); $('copy').textContent = '복사됨'; }
+    setTimeout(() => ($('copy').textContent = '복사'), 1500);
+  };
+  $('newcode').onclick = (e) => {
+    e.preventDefault();
+    PHONECAM.store('phonecam.room', '');
+    q.delete('room');
+    location.search = q.toString();
+  };
+  $('soundbtn').onclick = (e) => { e.stopPropagation(); video.muted = false; video.play().catch(() => {}); $('soundbtn').classList.add('hidden'); };
+  document.addEventListener('click', (e) => {
+    if (obsMode || !document.body.classList.contains('live')) return;
+    if (e.target.closest('.panel-box')) return;
+    document.body.classList.toggle('show-panel');
+  });
+
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+    window.__phonecamStatus = kind || 'wait';
+  }
+
+  let peer = null;
+  let current = null;
+
+  function goWaiting(msg) {
+    $('soundbtn').classList.add('hidden');
+    document.body.classList.remove('live', 'show-panel');
+    video.srcObject = null;
+    setStatus(msg || '아이폰 연결을 기다리는 중', '');
+  }
+
+  function watchCall(call) {
+    const pc = call.peerConnection;
+    if (!pc) return;
+    pc.addEventListener('connectionstatechange', () => {
+      if (call !== current) return;
+      const s = pc.connectionState;
+      if (s === 'connected') {
+        setStatus('연결됨', 'ok');
+        // 같은 와이파이(집 안 경로)로 연결됐는지 확인. 아니면 끊는다.
+        PHONECAM.connectionPath(pc).then((path) => {
+          window.__phonecamPath = path;
+          if (call === current && !path.local) {
+            current = null;
+            try { call.close(); } catch (e) {}
+            goWaiting('같은 와이파이가 아닌 곳에서 온 연결이라 막았습니다. 다시 기다리는 중');
+          }
+        });
+      }
+      if (s === 'failed' || s === 'closed') { current = null; goWaiting('연결이 끊겼습니다. 다시 기다리는 중'); }
+    });
+  }
+
+  // 코드를 아는 아이폰만 통과시킨다: 서로 무작위 숫자를 주고받고 코드로 만든 키로 서명해 확인
+  const allowed = new Set();
+
+  function handshake(conn) {
+    const myNonce = PHONECAM.nonce();
+    let done = false;
+    const timer = setTimeout(() => { if (!done) conn.close(); }, 10000);
+    conn.on('open', () => conn.send({ t: 'hello', n: myNonce }));
+    conn.on('data', async (m) => {
+      if (done || !m || m.t !== 'auth' || typeof m.n !== 'string' || m.n.length > 64) return;
+      done = true;
+      clearTimeout(timer);
+      const expect = await PHONECAM.sign(code, 'S|' + myNonce + '|' + m.n);
+      if (!PHONECAM.sameMac(m.mac, expect)) {
+        conn.send({ t: 'deny' });
+        setTimeout(() => conn.close(), 300);
+        return;
+      }
+      allowed.add(conn.peer);
+      conn.send({ t: 'ok', mac: await PHONECAM.sign(code, 'R|' + m.n + '|' + myNonce) });
+      // 확인된 아이폰에서 오는 효과 설정만 받는다
+      conn.on('data', async (msg) => {
+        if (!msg || !allowed.has(conn.peer)) return;
+        if (msg.t === 'fxphoto') {
+          // 배경 사진: JPEG/PNG, 6MB 이하만 받는다
+          const data = msg.data instanceof ArrayBuffer ? msg.data : ArrayBuffer.isView(msg.data) ? msg.data : null;
+          const type = msg.type === 'image/png' ? 'image/png' : 'image/jpeg';
+          if (!data || data.byteLength > 6 * 1024 * 1024) return;
+          await PHONECAM_FX.setPhoto(new Blob([data], { type }));
+          PHONECAM_FX.set(PHONECAM_FX.fx);
+        }
+        if (msg.t === 'fx' && msg.fx && typeof msg.fx === 'object') {
+          const pick = (v, list, d) => (list.includes(v) ? v : d);
+          const f = {
+            bg: pick(msg.fx.bg, ['none', 'blur', 'studio', 'dark', 'photo'], 'none'),
+            light: pick(Number(msg.fx.light), [0, 1, 2], 0),
+            smooth: pick(Number(msg.fx.smooth), [0, 1, 2], 0),
+            rot: pick(Number(msg.fx.rot), [0, 90, 180, 270], 0),
+            flip: msg.fx.flip === true,
+          };
+          PHONECAM.store('phonecam.fx', JSON.stringify(f));
+          PHONECAM_FX.set(f);
+        }
+      });
+      // 효과 처리 상태를 아이폰에 알려 준다 (속도 확인용)
+      const tick = setInterval(() => {
+        if (!conn.open) return clearInterval(tick);
+        const st = PHONECAM_FX.stats;
+        conn.send({ t: 'fxstate', on: st.mode !== 'off', fps: st.fps, segMs: st.segMs, ready: PHONECAM_FX.ready, failed: PHONECAM_FX.failed });
+      }, 2000);
+    });
+    conn.on('close', () => { clearTimeout(timer); allowed.delete(conn.peer); });
+  }
+
+  async function start() {
+    peer = new Peer(await PHONECAM.peerId(code), PHONECAM.peerOptions());
+
+    peer.on('open', () => goWaiting());
+
+    peer.on('connection', handshake);
+
+    peer.on('call', (call) => {
+      if (!allowed.has(call.peer)) { try { call.close(); } catch (e) {} return; } // 확인 안 된 상대의 영상은 받지 않는다
+      if (current) { try { current.close(); } catch (e) {} }
+      current = call;
+      call.answer();
+      call.on('stream', (stream) => {
+        if (call !== current) return;
+        video.srcObject = stream;
+        // OBS에서는 소리를 바로 켠다(OBS가 소리를 받아 감). 일반 브라우저는 자동 재생 제한 때문에 버튼으로 켠다.
+        const hasAudio = stream.getAudioTracks().length > 0;
+        if (obsMode) video.muted = false;
+        $('soundbtn').classList.toggle('hidden', obsMode || !hasAudio || !video.muted);
+        video.play().catch(() => { video.muted = true; video.play().catch(() => {}); });
+        document.body.classList.add('live');
+        setStatus('연결됨', 'ok');
+      });
+      call.on('close', () => { if (call === current) { current = null; goWaiting('연결이 끊겼습니다. 다시 기다리는 중'); } });
+      call.on('error', () => { if (call === current) { current = null; goWaiting('연결 오류. 다시 기다리는 중'); } });
+      // peerConnection은 answer 직후 만들어진다
+      setTimeout(() => watchCall(call), 0);
+    });
+
+    peer.on('disconnected', () => {
+      // 중개 서버와의 연결만 끊긴 상태. 영상은 계속될 수 있으니 조용히 다시 붙는다.
+      setTimeout(() => { if (peer && !peer.destroyed) peer.reconnect(); }, 2000);
+    });
+
+    peer.on('error', (err) => {
+      if (err.type === 'unavailable-id') {
+        setStatus('같은 코드의 받는 화면이 이미 열려 있습니다. 다른 창(또는 OBS)을 닫거나 새 코드를 만드세요.', 'bad');
+        setTimeout(restart, 5000);
+        return;
+      }
+      if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
+        setStatus('중개 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요. 다시 시도하는 중…', 'bad');
+        setTimeout(restart, 5000);
+      }
+    });
+  }
+
+  function restart() {
+    if (current) { setTimeout(restart, 5000); return; } // 영상이 오가는 중이면 끝난 뒤에 다시 시도
+    try { peer && peer.destroy(); } catch (e) {}
+    start();
+  }
+
+  start();
+})();
+</script>
+</body>
+</html>

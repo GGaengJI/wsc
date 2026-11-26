@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PhoneCam</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="home">
+  <div>
+    <h1>PhoneCam</h1>
+    <p class="muted">아이폰을 PC 웹캠처럼 쓰는 페이지입니다. 같은 와이파이 안에서 영상이 기기끼리 바로 전송됩니다.</p>
+  </div>
+
+  <div class="card">
+    <h2>PC에서 열었다면</h2>
+    <p>받는 화면을 열면 QR 코드가 나옵니다. 아이폰 카메라로 그 QR을 찍으세요.</p>
+    <a class="btn primary" id="go-receive" href="receive.html">PC: 받는 화면 열기</a>
+  </div>
+
+  <div class="card">
+    <h2>아이폰에서 열었다면</h2>
+    <p>PC 화면의 QR을 찍는 게 가장 쉽습니다. QR을 못 찍으면 아래에서 코드를 직접 입력하세요.</p>
+    <a class="btn" id="go-send" href="send.html">아이폰: 코드 입력해서 보내기</a>
+  </div>
+
+  <p class="muted small">Discord·Zoom에서 카메라로 고르려면 PC에 무료 프로그램 OBS Studio가 필요합니다. 방법은 받는 화면에 적혀 있습니다.</p>
+</main>
+<script src="common.js"></script>
+<script>
+  document.getElementById('go-receive').href = PHONECAM.carryParams('receive.html');
+  document.getElementById('go-send').href = PHONECAM.carryParams('send.html');
+</script>
+</body>
+</html>
