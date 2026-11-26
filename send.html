@@ -109,6 +109,21 @@
   let lenses = [];                                           // 이 아이폰에서 고를 수 있는 카메라 목록
   let hwZoom = null;                                         // 렌즈 줌 범위 {min, max, step}. 없으면 디지털 줌
 
+  let selfMirror = false;                                    // 전면 카메라: 미리보기를 거울처럼
+  // 아이폰 미리보기에도 PC로 나가는 모습(회전·좌우 반전·디지털 줌)을 그대로 보여 준다
+  function updatePreview() {
+    let f; try { f = fx; } catch (e) { f = { rot: 0, flip: false, zoom: 1 }; }
+    const side = f.rot === 90 || f.rot === 270;
+    const wrap = video.parentElement;
+    const W = wrap.clientWidth, H = wrap.clientHeight;
+    Object.assign(video.style, side
+      ? { width: H + 'px', height: W + 'px', left: (W - H) / 2 + 'px', top: (H - W) / 2 + 'px', right: 'auto', bottom: 'auto' }
+      : { width: '', height: '', left: '', top: '', right: '', bottom: '' });
+    const z = Math.min(4, Math.max(1, Number(f.zoom) || 1));
+    video.style.transform = (selfMirror ? 'scaleX(-1) ' : '') + (f.flip ? 'scaleX(-1) ' : '') + 'rotate(' + f.rot + 'deg)' + (z > 1 ? ' scale(' + z + ')' : '');
+  }
+  window.addEventListener('resize', () => updatePreview());
+
   async function openCamera() {
     const qq = QUALITY[qIndex];
     let deviceId = null;
@@ -145,7 +160,8 @@
     if (vt) vt.addEventListener('ended', () => { if (running && stream === s) reopenCamera(); });
     video.srcObject = s;
     const st = vt ? vt.getSettings() : {};
-    video.classList.toggle('mirror', st.facingMode ? st.facingMode === 'user' : /front|전면/i.test(vt ? vt.label : '') || (!deviceId && facing === 'user'));
+    selfMirror = (st.facingMode ? st.facingMode === 'user' : /front|전면/i.test(vt ? vt.label : '') || (!deviceId && facing === 'user'));
+    updatePreview();
     setTimeout(() => { refreshLenses(vt); setupZoom(vt); }, 0);
     video.play().catch(() => {});
     return s;
@@ -436,6 +452,7 @@
     $('fxflip').classList.toggle('primary', fx.flip);
     $('fxfit').textContent = '화면 맞춤: ' + (fx.fit === 'cover' ? '꽉 채우기 (가장자리 잘림)' : '전체 보기');
     $('fxfit').classList.toggle('primary', fx.fit === 'cover');
+    updatePreview();
   }
   function sendFx() {
     PHONECAM.store('phonecam.fxsend', JSON.stringify(fx));
