@@ -208,6 +208,7 @@
             rot: pick(Number(msg.fx.rot), [0, 90, 180, 270], 0),
             flip: msg.fx.flip === true,
             fit: msg.fx.fit === 'cover' ? 'cover' : 'contain',
+            zoom: Number.isFinite(Number(msg.fx.zoom)) ? Math.round(Math.min(4, Math.max(1, Number(msg.fx.zoom))) * 20) / 20 : 1,
           };
           applyFit(f.fit);
           PHONECAM.store('phonecam.fx', JSON.stringify(f));

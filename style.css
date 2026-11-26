@@ -119,3 +119,7 @@ body.fx-on #fxcanvas { display: block; }
 body.fx-on #remote { visibility: hidden; }
 .fxgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .fxtitle { grid-column: 1 / -1; font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+.zoomrow { display: flex; align-items: center; gap: 12px; }
+.zoomrow span { flex: none; min-width: 120px; font-size: 14px; color: var(--muted); }
+.zoomrow input { flex: 1; padding: 0; height: 32px; accent-color: var(--accent); letter-spacing: 0; }

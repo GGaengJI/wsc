@@ -4,7 +4,7 @@
 // 효과 설정(fx) 형식: { bg: 'none'|'blur'|'studio'|'dark'|'photo', light: 0|1|2, smooth: 0|1|2, rot: 0|90|180|270, flip: bool }
 
 const PHONECAM_FX = (() => {
-  const DEFAULT = { bg: 'none', light: 0, smooth: 0, rot: 0, flip: false, fit: 'contain' };
+  const DEFAULT = { bg: 'none', light: 0, smooth: 0, rot: 0, flip: false, fit: 'contain', zoom: 1 };
   const MP = 'vendor/mediapipe/';
 
   let video = null;
@@ -37,7 +37,7 @@ const PHONECAM_FX = (() => {
   let fpsStart = 0;
   const stats = { fps: 0, segMs: 0, mode: 'off' };
 
-  const oriented = () => fx.rot !== 0 || fx.flip;
+  const oriented = () => fx.rot !== 0 || fx.flip || fx.zoom > 1;
   const active = () => fx.bg !== 'none' || fx.light > 0 || fx.smooth > 0 || oriented();
   const needsMask = () => fx.bg !== 'none' || fx.smooth > 0;
 
@@ -57,7 +57,8 @@ const PHONECAM_FX = (() => {
     frameCtx = frameCanvas.getContext('2d');
   }
 
-  // 아이폰을 뒤집거나 눕혀 놓았을 때: 장면을 돌리고 필요하면 좌우를 뒤집는다
+  // 아이폰을 뒤집거나 눕혀 놓았을 때: 장면을 돌리고 필요하면 좌우를 뒤집는다.
+  // 디지털 줌(렌즈 줌이 안 되는 경우): 가운데를 잘라 키운다
   function orient(vw, vh) {
     if (!oriented()) return { el: video, w: vw, h: vh };
     const side = fx.rot === 90 || fx.rot === 270;
@@ -68,7 +69,9 @@ const PHONECAM_FX = (() => {
     frameCtx.translate(w / 2, h / 2);
     if (fx.flip) frameCtx.scale(-1, 1);
     frameCtx.rotate((fx.rot * Math.PI) / 180);
-    frameCtx.drawImage(video, -vw / 2, -vh / 2, vw, vh);
+    const z = Math.min(4, Math.max(1, fx.zoom || 1));
+    const cw = vw / z, ch = vh / z;
+    frameCtx.drawImage(video, (vw - cw) / 2, (vh - ch) / 2, cw, ch, -vw / 2, -vh / 2, vw, vh);
     frameCtx.restore();
     return { el: frameCanvas, w, h };
   }
