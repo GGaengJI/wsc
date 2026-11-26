@@ -4,7 +4,7 @@
 // 효과 설정(fx) 형식: { bg: 'none'|'blur'|'studio'|'dark'|'photo', light: 0|1|2, smooth: 0|1|2, rot: 0|90|180|270, flip: bool }
 
 const PHONECAM_FX = (() => {
-  const DEFAULT = { bg: 'none', light: 0, smooth: 0, rot: 0, flip: false };
+  const DEFAULT = { bg: 'none', light: 0, smooth: 0, rot: 0, flip: false, fit: 'contain' };
   const MP = 'vendor/mediapipe/';
 
   let video = null;

@@ -73,7 +73,8 @@ input {
 
 /* PC 수신 화면 */
 body.receive { overflow: hidden; background: #000; }
-#remote { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+#remote { position: fixed; left: 0; top: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+#debug { position: fixed; left: 8px; top: 8px; z-index: 9; color: #0f0; font: 14px monospace; background: rgba(0,0,0,.6); padding: 4px 8px; }
 body.cover #remote { object-fit: cover; }
 #panel {
   position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -112,7 +113,7 @@ body.live #obswait { display: none; }
 .statsline { padding: 0 16px 8px; min-height: 1.4em; }
 
 /* 효과: 켜지면 원본 영상 대신 캔버스를 보여 준다 */
-#fxcanvas { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; display: none; background: #000; }
+#fxcanvas { position: fixed; left: 0; top: 0; width: 100%; height: 100%; object-fit: contain; display: none; background: #000; }
 body.cover #fxcanvas { object-fit: cover; }
 body.fx-on #fxcanvas { display: block; }
 body.fx-on #remote { visibility: hidden; }

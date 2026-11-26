@@ -53,7 +53,14 @@
   if (q.get('fit') === 'cover') document.body.classList.add('cover');
   // 효과는 PC에서 처리. 설정은 아이폰에서 보내오고, 다음에 열 때를 위해 기억해 둔다.
   PHONECAM_FX.init($('remote'), $('fxcanvas'));
-  try { PHONECAM_FX.set(JSON.parse(PHONECAM.store('phonecam.fx') || 'null')); } catch (e) {}
+  // 화면 맞춤: 전체 보기(contain) 또는 꽉 채우기(cover, 가장자리 잘림). 주소의 fit=cover가 우선
+  const urlCover = q.get('fit') === 'cover';
+  function applyFit(fit) { document.body.classList.toggle('cover', urlCover || fit === 'cover'); }
+  try {
+    const saved = JSON.parse(PHONECAM.store('phonecam.fx') || 'null');
+    PHONECAM_FX.set(saved);
+    applyFit(saved && saved.fit);
+  } catch (e) {}
   // OBS용 화면: QR과 코드를 숨긴다 (Discord 화면에 코드가 비치지 않게)
   const obsMode = q.get('obs') === '1';
   if (obsMode) { document.body.classList.add('obs'); $('obswait').classList.remove('hidden'); }
@@ -90,6 +97,32 @@
     q.delete('room');
     location.search = q.toString();
   };
+  // 영상·효과 화면을 창 크기에 맞춰 직접 배치한다.
+  // (OBS 안의 브라우저는 영상 해상도가 바뀌어도 화면 맞춤을 다시 하지 않는 경우가 있어 CSS에만 맡기지 않는다)
+  const fxCanvas = $('fxcanvas');
+  const coverMode = () => document.body.classList.contains('cover');
+  let lastLayout = '';
+  function layout() {
+    const W = window.innerWidth, H = window.innerHeight;
+    const items = [[video, video.videoWidth, video.videoHeight], [fxCanvas, fxCanvas.width, fxCanvas.height]];
+    let sig = W + 'x' + H + (coverMode() ? 'c' : '');
+    for (const [, w, h] of items) sig += '|' + w + 'x' + h;
+    if (sig === lastLayout) return;
+    lastLayout = sig;
+    for (const [el, w, h] of items) {
+      if (!w || !h) continue;
+      const s = coverMode() ? Math.max(W / w, H / h) : Math.min(W / w, H / h);
+      const dw = Math.round(w * s), dh = Math.round(h * s);
+      Object.assign(el.style, { left: Math.round((W - dw) / 2) + 'px', top: Math.round((H - dh) / 2) + 'px', width: dw + 'px', height: dh + 'px', right: 'auto', bottom: 'auto', objectFit: 'fill' });
+    }
+    if (debugEl) debugEl.textContent = '영상 ' + video.videoWidth + '×' + video.videoHeight + ' → 화면 ' + video.style.width + '×' + video.style.height + ' (창 ' + W + '×' + H + ')';
+  }
+  const debugEl = q.get('debug') === '1' ? document.body.appendChild(Object.assign(document.createElement('div'), { id: 'debug' })) : null;
+  video.addEventListener('resize', layout);
+  video.addEventListener('loadedmetadata', layout);
+  window.addEventListener('resize', layout);
+  setInterval(layout, 500);
+
   $('soundbtn').onclick = (e) => { e.stopPropagation(); video.muted = false; video.play().catch(() => {}); $('soundbtn').classList.add('hidden'); };
   document.addEventListener('click', (e) => {
     if (obsMode || !document.body.classList.contains('live')) return;
@@ -174,7 +207,9 @@
             smooth: pick(Number(msg.fx.smooth), [0, 1, 2], 0),
             rot: pick(Number(msg.fx.rot), [0, 90, 180, 270], 0),
             flip: msg.fx.flip === true,
+            fit: msg.fx.fit === 'cover' ? 'cover' : 'contain',
           };
+          applyFit(f.fit);
           PHONECAM.store('phonecam.fx', JSON.stringify(f));
           PHONECAM_FX.set(f);
         }
